@@ -1204,34 +1204,70 @@
            All volume changes run through one gentle fader: the song
            fades IN over the first ~2 seconds so it never startles, and
            when the guest scrolls to the very end of the invitation —
-           the closing blessings — it fades smoothly away to silence;
-           scroll back up and it melts back in, just as softly. */
+           the closing blessings — it fades smoothly out and then
+           actually stops (playback pauses, it does not loop silently);
+           scroll back up and it melts back in, just as softly. If the
+           page is hidden — browser minimised, tab switched, or the app
+           backgrounded — the song pauses at once, and resumes on
+           return only if it was playing and had not end-stopped. */
         var music = document.getElementById("bgMusic");
         var MUSIC_LEVEL = 0.55;
         var musicStarted = false;
-        var volTarget = 0, volTimer = null;
-        function fadeVolumeTo(target) {
+        var musicEndStopped = false;
+        var pausedByHidden = false;
+        var wasPlayingBeforeHidden = false;
+        var volTarget = 0, volTimer = null, volFadeDone = null;
+        function cancelFade() {
+          if (volTimer) { clearInterval(volTimer); volTimer = null; }
+          volFadeDone = null;
+        }
+        function fadeVolumeTo(target, onDone) {
           volTarget = target;
-          if (volTimer || !music) return;
+          volFadeDone = typeof onDone === "function" ? onDone : null;
+          if (!music) { var cb0 = volFadeDone; volFadeDone = null; if (cb0) cb0(); return; }
+          if (volTimer) return;
           volTimer = setInterval(function () {
             var diff = volTarget - music.volume;
             if (Math.abs(diff) <= 0.02) {
               try { music.volume = volTarget; } catch (e) {}
               clearInterval(volTimer); volTimer = null;
+              var cb = volFadeDone; volFadeDone = null;
+              if (cb) cb();
               return;
             }
             try { music.volume = Math.max(0, Math.min(1, music.volume + diff * 0.16)); } catch (e) {}
           }, 60);
         }
-        function startMusic() {
+        function playMusic(fadeIn) {
           if (!music) return;
           try {
-            music.volume = 0;
+            if (fadeIn) { try { music.volume = 0; } catch (e) {} }
             var p = music.play();
             if (p && p.catch) p.catch(function () { /* blocked or missing: stay silent */ });
-            musicStarted = true;
-            fadeVolumeTo(atEndOfPage ? 0 : MUSIC_LEVEL);
+            if (fadeIn) fadeVolumeTo(MUSIC_LEVEL);
           } catch (e) { /* no audio support: the invitation still opens */ }
+        }
+        function stopMusicAtEnd() {
+          /* Fade out smoothly, then actually STOP playback — not just
+             muted looping in the background. */
+          fadeVolumeTo(0, function () {
+            if (!atEndOfPage) return;
+            try { music.pause(); } catch (e) {}
+            musicEndStopped = true;
+          });
+        }
+        function startMusic() {
+          if (!music) return;
+          musicEndStopped = false;
+          pausedByHidden = false;
+          wasPlayingBeforeHidden = false;
+          musicStarted = true;
+          if (atEndOfPage) {
+            try { music.volume = 0; var p0 = music.play(); if (p0 && p0.catch) p0.catch(function () {}); } catch (e) {}
+            stopMusicAtEnd();
+          } else {
+            playMusic(true);
+          }
         }
         openBtn.addEventListener("click", startMusic);
 
@@ -1243,10 +1279,57 @@
           var near = max > 0 && (max - doc.scrollTop) < Math.max(320, doc.clientHeight * 0.5);
           if (near === atEndOfPage) return;
           atEndOfPage = near;
-          if (musicStarted) fadeVolumeTo(atEndOfPage ? 0 : MUSIC_LEVEL);
+          if (!musicStarted || !music) return;
+          if (atEndOfPage) {
+            stopMusicAtEnd();
+          } else if (musicEndStopped) {
+            /* Guest scrolled back up from the end: bring the song back. */
+            musicEndStopped = false;
+            pausedByHidden = false;
+            wasPlayingBeforeHidden = false;
+            if (!document.hidden) playMusic(true);
+            else { wasPlayingBeforeHidden = true; pausedByHidden = true; }
+          } else if (!document.hidden && !music.paused) {
+            fadeVolumeTo(MUSIC_LEVEL);
+          }
         }
         window.addEventListener("scroll", checkSongEnd, { passive: true });
         window.addEventListener("resize", checkSongEnd);
+
+        /* ---- Pause the moment the page is hidden ----
+           Minimising the browser, switching tabs, or sending the app
+           to the background on mobile must not leave the song playing.
+           When the page comes back: resume only if it was playing
+           before it was hidden and it had not already stopped at the
+           end of the page. An end-stopped song stays stopped. */
+        function pauseForHidden() {
+          if (!music || !musicStarted) return;
+          if (!music.paused) {
+            wasPlayingBeforeHidden = true;
+            pausedByHidden = true;
+            cancelFade();
+            try { music.pause(); } catch (e) {}
+          } else if (!musicEndStopped) {
+            /* Already paused for another reason: only remember state
+               if a hidden-pause was already in progress. */
+            if (!pausedByHidden) wasPlayingBeforeHidden = false;
+          }
+        }
+        function resumeFromHidden() {
+          if (!music || !musicStarted) return;
+          var shouldResume = pausedByHidden && wasPlayingBeforeHidden && !musicEndStopped && !atEndOfPage;
+          /* Hidden mid-fade-out at the very end: treat it as end-stopped
+             so it stays off now, and can still return on scroll-up. */
+          if (pausedByHidden && wasPlayingBeforeHidden && atEndOfPage && !musicEndStopped) musicEndStopped = true;
+          pausedByHidden = false;
+          wasPlayingBeforeHidden = false;
+          if (shouldResume) playMusic(true);
+        }
+        document.addEventListener("visibilitychange", function () {
+          if (document.hidden || document.visibilityState === "hidden") pauseForHidden();
+          else resumeFromHidden();
+        });
+        window.addEventListener("pagehide", pauseForHidden);
 
         /* Safety net: if anything goes wrong, never trap the guest behind the cover. */
         window.addEventListener("error", function () {
